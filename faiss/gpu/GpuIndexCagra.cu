@@ -204,65 +204,37 @@ void GpuIndexCagra::copyFrom(const faiss::IndexHNSWCagra* index) {
 
 void GpuIndexCagra::copyTo(faiss::IndexHNSWCagra* index) const {
     FAISS_ASSERT(index_ && this->is_trained && index);
-
     DeviceScope scope(config_.device);
 
-    //
-    // Index information
-    //
+    // Copy common GPU index metadata
     GpuIndex::copyTo(index);
-    // This needs to be zeroed out as this implementation adds vectors to the
-    // cpuIndex instead of copying fields
+
+    // Remove flat index
+    index->storage = nullptr;
+
+    // Set ntotal to 0, will be filled manually below
     index->ntotal = 0;
 
-    auto graph_degree = index_->get_knngraph_degree();
+    // Get graph degree (fan-out), which determines HNSW M parameter
+    idx_t graph_degree = index_->get_knngraph_degree();
     auto M = graph_degree / 2;
-    if (index->storage and index->own_fields) {
-        delete index->storage;
-    }
 
-    if (this->metric_type == METRIC_L2) {
-        index->storage = new IndexFlatL2(index->d);
-    } else if (this->metric_type == METRIC_INNER_PRODUCT) {
-        index->storage = new IndexFlatIP(index->d);
-    }
     index->own_fields = true;
     index->keep_max_size_level0 = true;
+
+    // Reset and reinitialize the HNSW structure
     index->hnsw.reset();
     index->hnsw.assign_probas.clear();
     index->hnsw.cum_nneighbor_per_level.clear();
     index->hnsw.set_default_probas(M, 1.0 / log(M));
 
+    // Prepare level 0 connections
     auto n_train = this->ntotal;
-    float* train_dataset;
-    auto dataset = index_->get_training_dataset();
-    bool allocation = false;
-    if (getDeviceForAddress(dataset) >= 0) {
-        train_dataset = new float[n_train * index->d];
-        allocation = true;
-        raft::copy(
-                train_dataset,
-                dataset,
-                n_train * index->d,
-                this->resources_->getRaftHandleCurrentDevice().get_stream());
-    } else {
-        train_dataset = const_cast<float*>(dataset);
-    }
-
-    // turn off as level 0 is copied from CAGRA graph
     index->init_level0 = false;
-    if (!index->base_level_only) {
-        index->add(n_train, train_dataset);
-    } else {
-        index->hnsw.prepare_level_tab(n_train, false);
-        index->storage->add(n_train, train_dataset);
-        index->ntotal = n_train;
-    }
-    if (allocation) {
-        delete[] train_dataset;
-    }
+    index->hnsw.prepare_level_tab(n_train, false);
 
-    auto graph = get_knngraph();
+    // Copy precomputed graph structure into the CPU index
+    const auto graph = get_knngraph();
 
 #pragma omp parallel for
     for (idx_t i = 0; i < n_train; i++) {
@@ -273,7 +245,8 @@ void GpuIndexCagra::copyTo(faiss::IndexHNSWCagra* index) const {
         }
     }
 
-    // turn back on to allow new vectors to be added to level 0
+    // Set final ntotal and allow adding new vectors to level 0 later
+    index->ntotal = n_train;
     index->init_level0 = true;
 }
 
