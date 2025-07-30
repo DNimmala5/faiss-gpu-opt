@@ -52,6 +52,9 @@
 #include <faiss/IndexBinaryHash.h>
 #include <faiss/IndexBinaryIVF.h>
 
+#include <fstream>
+#include <iomanip>
+
 /*************************************************************
  * The I/O format is the content of the class. For objects that are
  * inherited, like Index, a 4-character-code (fourcc) indicates which
@@ -389,18 +392,35 @@ static void write_ivf_header(const IndexIVF* ivf, IOWriter* f) {
 }
 
 void write_index(const Index* idx, IOWriter* f, int io_flags) {
+    std::ofstream log("/tmp/vectors_analysis.log", std::ios::app);
+    log << "IN FAISS INDEX WRITE FUNCTION" << std::endl;
     if (idx == nullptr) {
         // eg. for a storage component of HNSW that is set to nullptr
         uint32_t h = fourcc("null");
         WRITE1(h);
     } else if (const IndexFlat* idxf = dynamic_cast<const IndexFlat*>(idx)) {
-        uint32_t h =
-                fourcc(idxf->metric_type == METRIC_INNER_PRODUCT ? "IxFI"
-                               : idxf->metric_type == METRIC_L2  ? "IxF2"
-                                                                 : "IxFl");
+        log << "INSIDE THE INDEX FLAT PART OF THE WRITE INDEX" << std::endl;
+        uint32_t h = fourcc(idxf->metric_type == METRIC_INNER_PRODUCT ? "IxFI" : idxf->metric_type == METRIC_L2  ? "IxF2" : "IxFl");
         WRITE1(h);
         write_index_header(idx, f);
         WRITEXBVECTOR(idxf->codes);
+        // Log vectors from flat index
+        log << "Logging vectors from IndexFlat:" << std::endl;
+        log << "dim=" << idxf->d << ", ntotal=" << idxf->ntotal
+            << ", metric_type=" << (idxf->metric_type == METRIC_L2 ? "L2" : "IP") << std::endl;
+
+        std::vector<float> vec(idxf->d);
+        for (faiss::idx_t i = 0; i < idxf->ntotal; ++i) {
+            if (i % 1000 == 0 || i % 1000 == 1) {  // Log 2 vectors every 1000
+                idxf->reconstruct(i, vec.data());
+                log << "  vector[" << i << "]: [";
+                for (int j = 0; j < idxf->d; ++j) {
+                    log << std::setprecision(6) << vec[j];
+                    if (j < idxf->d - 1) log << ", ";
+                }
+                log << "]" << std::endl;
+            }
+        }
     } else if (const IndexLSH* idxl = dynamic_cast<const IndexLSH*>(idx)) {
         uint32_t h = fourcc("IxHe");
         WRITE1(h);
@@ -753,11 +773,74 @@ void write_index(const Index* idx, IOWriter* f, int io_flags) {
         uint32_t h = dynamic_cast<const IndexIDMap2*>(idx) ? fourcc("IxM2")
                                                            : fourcc("IxMp");
         // no need to store additional info for IndexIDMap2
+
+        log << "INSIDE THE INDEXIDMAP SECTION OF WRITE INDEX" << std::endl;
+            log << "IndexIDMap: "
+                << "dim=" << idxmap->d
+                << ", ntotal=" << idxmap->ntotal
+                << ", trained=" << (idxmap->is_trained ? "yes" : "no")
+                << std::endl;
+            // Check for nested HNSW and Flat indices
+            if (auto hnsw = dynamic_cast<const IndexHNSW*>(idxmap->index)) {
+                if (auto flat = dynamic_cast<const IndexFlat*>(hnsw->storage)) {
+                    log << "Found nested IndexFlat in HNSW: "
+                        << "dim=" << flat->d
+                        << ", ntotal=" << flat->ntotal
+                        << ", metric_type=" << (flat->metric_type == METRIC_L2 ? "L2" : "IP")
+                        << std::endl;
+
+                    // Log vectors from flat index
+                    std::vector<float> vec(flat->d);
+                    for (faiss::idx_t i = 0; i < flat->ntotal; ++i) {
+                        if (i % 1000 == 0 || i % 1000 == 1) {  // Log 2 vectors every 1000
+                            flat->reconstruct(i, vec.data());
+                            log << "  vector[" << i << "]: [";
+                            for (int j = 0; j < flat->d; ++j) {
+                                log << std::setprecision(6) << vec[j];
+                                if (j < flat->d - 1) log << ", ";
+                            }
+                            log << "]" << std::endl;
+                        }
+                    }
+                }
+            }
         WRITE1(h);
         write_index_header(idxmap, f);
         write_index(idxmap->index, f);
         WRITEVECTOR(idxmap->id_map);
     } else if (const IndexHNSW* idxhnsw = dynamic_cast<const IndexHNSW*>(idx)) {
+        log << "INSIDE THE INDEX HNSW SECTION OF THE WRITE INDEX" << std::endl;
+
+            log << "IndexHNSW: "
+                << "dim=" << idxhnsw->d
+                << ", ntotal=" << idxhnsw->ntotal
+                << ", trained=" << (idxhnsw->is_trained ? "yes" : "no")
+                << ", efSearch=" << idxhnsw->hnsw.efSearch
+                << ", efConstruction=" << idxhnsw->hnsw.efConstruction
+                << std::endl;
+
+            // Check for flat storage and log vectors
+            if (const IndexFlat* flat = dynamic_cast<const IndexFlat*>(idxhnsw->storage)) {
+                log << "Found Flat storage in HNSW: "
+                    << "dim=" << flat->d
+                    << ", ntotal=" << flat->ntotal
+                    << ", metric_type=" << (flat->metric_type == METRIC_L2 ? "L2" : "IP")
+                    << std::endl;
+
+                // Log vectors from flat storage
+                std::vector<float> vec(flat->d);
+                for (faiss::idx_t i = 0; i < flat->ntotal; ++i) {
+                    if (i % 1000 == 0 || i % 1000 == 1) {  // Log 2 vectors every 1000
+                        flat->reconstruct(i, vec.data());
+                        log << "  vector[" << i << "]: [";
+                        for (int j = 0; j < flat->d; ++j) {
+                            log << std::setprecision(6) << vec[j];
+                            if (j < flat->d - 1) log << ", ";
+                        }
+                        log << "]" << std::endl;
+                    }
+                }
+            }
         uint32_t h = dynamic_cast<const IndexHNSWFlat*>(idx) ? fourcc("IHNf")
                 : dynamic_cast<const IndexHNSWPQ*>(idx)      ? fourcc("IHNp")
                 : dynamic_cast<const IndexHNSWSQ*>(idx)      ? fourcc("IHNs")
