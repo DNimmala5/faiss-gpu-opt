@@ -209,9 +209,6 @@ void GpuIndexCagra::copyTo(faiss::IndexHNSWCagra* index) const {
     // Copy common GPU index metadata
     GpuIndex::copyTo(index);
 
-    // Remove flat index
-    index->storage = nullptr;
-
     // Set ntotal to 0, will be filled manually below
     index->ntotal = 0;
 
@@ -248,6 +245,9 @@ void GpuIndexCagra::copyTo(faiss::IndexHNSWCagra* index) const {
     // Set final ntotal and allow adding new vectors to level 0 later
     index->ntotal = n_train;
     index->init_level0 = true;
+
+    // Remove flat index
+    index->storage = nullptr;
 }
 
 void GpuIndexCagra::reset() {
